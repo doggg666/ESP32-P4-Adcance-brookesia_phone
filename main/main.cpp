@@ -197,6 +197,10 @@ extern "C" void app_main(void)
     assert(camera != nullptr && "Failed to create camera");
     assert((phone->installApp(camera) >= 0) && "Failed to begin camera");
 
+    Bme680Sensor *bme680_sensor = new Bme680Sensor();
+    assert(bme680_sensor != nullptr && "Failed to create bme680_sensor");
+    assert((phone->installApp(bme680_sensor) >= 0) && "Failed to begin bme680_sensor");
+
 #if CONFIG_EXAMPLE_ENABLE_SD_CARD
     ESP_LOGW(TAG, "Using Video Player example requires inserting the SD card in advance and saving an MJPEG format video on the SD card");
     if (sd_err == ESP_OK) {
