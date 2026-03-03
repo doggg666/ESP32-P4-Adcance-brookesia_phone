@@ -49,7 +49,7 @@ private:
 
     /* Background FreeRTOS task for sensor reads */
     TaskHandle_t _sensor_task_handle;
-    bool _task_running;
+    volatile bool _task_running;
 
     /* Screen dimensions */
     uint16_t _width;

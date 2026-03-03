@@ -125,6 +125,14 @@ bool Bme680Sensor::close(void)
         lv_timer_del(_ui_refresh_timer);
         _ui_refresh_timer = nullptr;
     }
+
+    /* Clean up I2C device handle */
+    if (_bme680_dev.i2c_dev) {
+        i2c_master_bus_rm_device(_bme680_dev.i2c_dev);
+        _bme680_dev.i2c_dev = NULL;
+        _bme680_dev.initialized = false;
+        _sensor_ok = false;
+    }
     return true;
 }
 
