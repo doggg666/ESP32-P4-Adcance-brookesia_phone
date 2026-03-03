@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "esp_brookesia.hpp"
 #include "bme680_driver.h"
@@ -34,12 +36,20 @@ private:
     /* Status label */
     lv_obj_t *_lbl_status;
 
-    /* Refresh timer */
-    lv_timer_t *_refresh_timer;
+    /* LVGL timer to update UI from cached sensor data */
+    lv_timer_t *_ui_refresh_timer;
 
     /* BME680 device */
     bme680_dev_t _bme680_dev;
     bool _sensor_ok;
+
+    /* Cached sensor data (written by task, read by LVGL timer) */
+    bme680_data_t _cached_data;
+    bool _cached_data_valid;
+
+    /* Background FreeRTOS task for sensor reads */
+    TaskHandle_t _sensor_task_handle;
+    bool _task_running;
 
     /* Screen dimensions */
     uint16_t _width;
@@ -50,6 +60,9 @@ private:
     lv_obj_t *createSensorCard(lv_obj_t *parent, const char *title, const char *unit,
                                lv_color_t accent_color, lv_obj_t **value_label_out);
 
-    /* Timer callback for periodic sensor reads */
-    static void refreshTimerCb(lv_timer_t *timer);
+    /* Background sensor read task */
+    static void sensorReadTask(void *param);
+
+    /* LVGL timer callback to update UI from cached data */
+    static void uiRefreshTimerCb(lv_timer_t *timer);
 };

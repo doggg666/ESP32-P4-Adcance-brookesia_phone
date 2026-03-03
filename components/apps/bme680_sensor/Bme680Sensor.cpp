@@ -43,12 +43,16 @@ Bme680Sensor::Bme680Sensor() :
     _lbl_pres_value(nullptr),
     _lbl_gas_value(nullptr),
     _lbl_status(nullptr),
-    _refresh_timer(nullptr),
+    _ui_refresh_timer(nullptr),
     _sensor_ok(false),
+    _cached_data_valid(false),
+    _sensor_task_handle(nullptr),
+    _task_running(false),
     _width(0),
     _height(0)
 {
     memset(&_bme680_dev, 0, sizeof(bme680_dev_t));
+    memset(&_cached_data, 0, sizeof(bme680_data_t));
 }
 
 Bme680Sensor::~Bme680Sensor()
@@ -88,11 +92,14 @@ bool Bme680Sensor::run(void)
 
     createUI();
 
-    /* Do an initial read immediately */
-    refreshTimerCb(nullptr);
+    /* Start background FreeRTOS task for non-blocking sensor reads */
+    if (_sensor_ok) {
+        _task_running = true;
+        xTaskCreate(sensorReadTask, "bme680_read", 4096, this, 3, &_sensor_task_handle);
+    }
 
-    /* Start periodic refresh timer */
-    _refresh_timer = lv_timer_create(refreshTimerCb, BME680_REFRESH_INTERVAL_MS, this);
+    /* Start LVGL timer to update UI from cached data (lightweight, non-blocking) */
+    _ui_refresh_timer = lv_timer_create(uiRefreshTimerCb, 500, this);
 
     return true;
 }
@@ -105,9 +112,18 @@ bool Bme680Sensor::back(void)
 
 bool Bme680Sensor::close(void)
 {
-    if (_refresh_timer) {
-        lv_timer_del(_refresh_timer);
-        _refresh_timer = nullptr;
+    /* Stop the background sensor read task */
+    _task_running = false;
+    if (_sensor_task_handle) {
+        /* Give the task time to exit its loop */
+        vTaskDelay(pdMS_TO_TICKS(100));
+        _sensor_task_handle = nullptr;
+    }
+
+    /* Stop the UI refresh timer */
+    if (_ui_refresh_timer) {
+        lv_timer_del(_ui_refresh_timer);
+        _ui_refresh_timer = nullptr;
     }
     return true;
 }
@@ -234,18 +250,38 @@ void Bme680Sensor::createUI(void)
     lv_obj_align(card_gas, LV_ALIGN_BOTTOM_RIGHT, 0, -5);
 }
 
-/* ---- Periodic refresh callback ---- */
+/* ---- Background sensor read task (runs on its own FreeRTOS task, non-blocking to LVGL) ---- */
 
-void Bme680Sensor::refreshTimerCb(lv_timer_t *timer)
+void Bme680Sensor::sensorReadTask(void *param)
 {
-    Bme680Sensor *app;
+    Bme680Sensor *app = (Bme680Sensor *)param;
 
-    if (timer == nullptr) {
-        /* Called directly for initial read - caller handles this case in run() */
-        return;
+    while (app->_task_running) {
+        bme680_data_t data;
+        esp_err_t ret = bme680_read_sensor_data(&app->_bme680_dev, &data);
+
+        if (ret == ESP_OK && data.sensor_ready) {
+            /* Update cached data (atomic-ish copy for simple struct) */
+            app->_cached_data = data;
+            app->_cached_data_valid = true;
+        } else {
+            app->_cached_data_valid = false;
+            ESP_LOGW(TAG, "Failed to read BME680 sensor data");
+        }
+
+        /* Wait before next read */
+        vTaskDelay(pdMS_TO_TICKS(BME680_REFRESH_INTERVAL_MS));
     }
 
-    app = (Bme680Sensor *)lv_timer_get_user_data(timer);
+    /* Task self-deletes when _task_running is set to false */
+    vTaskDelete(NULL);
+}
+
+/* ---- LVGL timer callback: updates UI from cached sensor data (non-blocking) ---- */
+
+void Bme680Sensor::uiRefreshTimerCb(lv_timer_t *timer)
+{
+    Bme680Sensor *app = (Bme680Sensor *)lv_timer_get_user_data(timer);
     if (app == nullptr) return;
 
     if (!app->_sensor_ok) {
@@ -253,30 +289,29 @@ void Bme680Sensor::refreshTimerCb(lv_timer_t *timer)
         lv_label_set_text(app->_lbl_hum_value, "--.-");
         lv_label_set_text(app->_lbl_pres_value, "----");
         lv_label_set_text(app->_lbl_gas_value, "--.-");
+        lv_label_set_text(app->_lbl_status, "Sensor: Not Found");
+        lv_obj_set_style_text_color(app->_lbl_status, lv_color_make(0xE7, 0x4C, 0x3C), 0);
         return;
     }
 
-    bme680_data_t data;
-    esp_err_t ret = bme680_read_sensor_data(&app->_bme680_dev, &data);
-
-    if (ret == ESP_OK && data.sensor_ready) {
+    if (app->_cached_data_valid) {
         char buf[32];
 
         /* Update temperature */
-        snprintf(buf, sizeof(buf), "%.1f", data.temperature);
+        snprintf(buf, sizeof(buf), "%.1f", app->_cached_data.temperature);
         lv_label_set_text(app->_lbl_temp_value, buf);
 
         /* Update humidity */
-        snprintf(buf, sizeof(buf), "%.1f", data.humidity);
+        snprintf(buf, sizeof(buf), "%.1f", app->_cached_data.humidity);
         lv_label_set_text(app->_lbl_hum_value, buf);
 
         /* Update pressure */
-        snprintf(buf, sizeof(buf), "%.1f", data.pressure);
+        snprintf(buf, sizeof(buf), "%.1f", app->_cached_data.pressure);
         lv_label_set_text(app->_lbl_pres_value, buf);
 
         /* Update gas resistance (convert to kOhm) */
-        if (data.gas_valid) {
-            snprintf(buf, sizeof(buf), "%.1f", data.gas_resistance / 1000.0f);
+        if (app->_cached_data.gas_valid) {
+            snprintf(buf, sizeof(buf), "%.1f", app->_cached_data.gas_resistance / 1000.0f);
             lv_label_set_text(app->_lbl_gas_value, buf);
         } else {
             lv_label_set_text(app->_lbl_gas_value, "N/A");
@@ -286,8 +321,7 @@ void Bme680Sensor::refreshTimerCb(lv_timer_t *timer)
         lv_label_set_text(app->_lbl_status, "Sensor: Connected");
         lv_obj_set_style_text_color(app->_lbl_status, lv_color_make(0x2E, 0xCC, 0x71), 0);
     } else {
-        lv_label_set_text(app->_lbl_status, "Sensor: Read Error");
-        lv_obj_set_style_text_color(app->_lbl_status, lv_color_make(0xE7, 0x4C, 0x3C), 0);
-        ESP_LOGW(TAG, "Failed to read BME680 sensor data");
+        lv_label_set_text(app->_lbl_status, "Sensor: Reading...");
+        lv_obj_set_style_text_color(app->_lbl_status, lv_color_make(0xFF, 0xC1, 0x07), 0);
     }
 }

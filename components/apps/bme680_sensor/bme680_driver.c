@@ -274,11 +274,15 @@ esp_err_t bme680_init(bme680_dev_t *dev, i2c_master_bus_handle_t i2c_bus, uint8_
     ret = bme680_read_reg(dev, BME680_REG_CHIP_ID, &chip_id, 1);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read chip ID");
+        i2c_master_bus_rm_device(dev->i2c_dev);
+        dev->i2c_dev = NULL;
         return ret;
     }
 
     if (chip_id != BME680_CHIP_ID) {
         ESP_LOGE(TAG, "Invalid chip ID: 0x%02X (expected 0x%02X)", chip_id, BME680_CHIP_ID);
+        i2c_master_bus_rm_device(dev->i2c_dev);
+        dev->i2c_dev = NULL;
         return ESP_ERR_NOT_FOUND;
     }
     ESP_LOGI(TAG, "BME680 detected (chip ID: 0x%02X)", chip_id);
